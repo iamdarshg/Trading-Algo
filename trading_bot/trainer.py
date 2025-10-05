@@ -14,7 +14,7 @@ import os
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
-
+torch.autograd.set_detect_anomaly(True)
 class TradingDataset(Dataset):
     """Custom dataset for trading data with text prompts"""
 
