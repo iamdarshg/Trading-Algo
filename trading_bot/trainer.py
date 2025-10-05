@@ -10,28 +10,23 @@ import warnings
 warnings.filterwarnings('ignore')
 torch.autograd.set_detect_anomaly(True)
 
-
 def _assert_no_nan_inf(t: torch.Tensor, where: str = ""):
     if not torch.isfinite(t).all():
         bad = t[~torch.isfinite(t)]
         raise ValueError(f"NaN/Inf detected {where}: shape={t.shape}, count={bad.numel()}")
-
 
 class TradingDataset(Dataset):
     def __init__(self, price_data: np.ndarray, targets: np.ndarray, text_data: Optional[np.ndarray] = None):
         self.price_data = torch.FloatTensor(price_data)
         self.targets = torch.FloatTensor(targets)
         self.text_data = torch.LongTensor(text_data) if text_data is not None else None
-
     def __len__(self):
         return len(self.price_data)
-
     def __getitem__(self, idx):
         sample = {'price_data': self.price_data[idx], 'target': self.targets[idx]}
         if self.text_data is not None:
             sample['text_data'] = self.text_data[0]
         return sample
-
 
 class TradingLoss(nn.Module):
     def __init__(self, directional_weight: float = 1.0, magnitude_weight: float = 1.0, risk_penalty: float = 0.1):
@@ -40,7 +35,6 @@ class TradingLoss(nn.Module):
         self.magnitude_weight = magnitude_weight
         self.risk_penalty = risk_penalty
         self._mse = nn.MSELoss()
-
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         _assert_no_nan_inf(predictions, "in TradingLoss predictions")
         _assert_no_nan_inf(targets, "in TradingLoss targets")
@@ -56,7 +50,6 @@ class TradingLoss(nn.Module):
         _assert_no_nan_inf(total_loss, "in TradingLoss total")
         return total_loss
 
-
 class EarlyStopping:
     def __init__(self, patience: int = 10, min_delta: float = 0.0, restore_best: bool = True):
         self.patience = patience
@@ -65,7 +58,6 @@ class EarlyStopping:
         self.best_loss = None
         self.counter = 0
         self.best_weights = None
-
     def __call__(self, val_loss: float, model: nn.Module) -> bool:
         if self.best_loss is None:
             self.best_loss = val_loss
@@ -81,17 +73,14 @@ class EarlyStopping:
                 self.load_checkpoint(model)
             return True
         return False
-
     def save_checkpoint(self, model: nn.Module):
         self.best_weights = model.state_dict().copy()
-
     def load_checkpoint(self, model: nn.Module):
         if self.best_weights is not None:
             model.load_state_dict(self.best_weights)
 
-
 class TradingTrainer:
-    def __init__(self, model: nn.Module, device: str = 'auto', learning_rate: float = 0.0001, weight_decay: float = 1e-5, scheduler_type: str = 'cosine', loss_function: str = 'trading'):
+    def __init__(self, model: nn.Module, device: str = 'auto', learning_rate: float = 1e-4, weight_decay: float = 1e-5, scheduler_type: str = 'cosine', loss_function: str = 'trading'):
         self.model = model
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -254,7 +243,7 @@ def create_data_loaders(processed_data: Dict[str, np.ndarray], encoded_news: Opt
 
 def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None) -> Tuple[nn.Module, Dict[str, List]]:
     if training_config is None:
-        training_config = {'epochs': 100, 'batch_size': 32, 'learning_rate': 0.0001, 'weight_decay': 1e-5, 'early_stopping_patience': 15, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
+        training_config = {'epochs': 100, 'batch_size': 32, 'learning_rate': 1e-4, 'weight_decay': 1e-5, 'early_stopping_patience': 15, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
     model = model_builder.build()
     train_loader, val_loader = create_data_loaders(processed_data, encoded_news, batch_size=training_config['batch_size'])
     trainer = TradingTrainer(model=model, learning_rate=training_config['learning_rate'], weight_decay=training_config['weight_decay'], scheduler_type=training_config['scheduler_type'], loss_function=training_config['loss_function'])
@@ -263,12 +252,10 @@ def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], e
 
 
 def get_training_config_conservative() -> Dict[str, Any]:
-    return {'epochs': 50, 'batch_size': 16, 'learning_rate': 0.0001, 'weight_decay': 1e-4, 'early_stopping_patience': 10, 'scheduler_type': 'plateau', 'loss_function': 'trading'}
-
+    return {'epochs': 50, 'batch_size': 16, 'learning_rate': 1e-4, 'weight_decay': 1e-4, 'early_stopping_patience': 10, 'scheduler_type': 'plateau', 'loss_function': 'trading'}
 
 def get_training_config_aggressive() -> Dict[str, Any]:
-    return {'epochs': 200, 'batch_size': 64, 'learning_rate': 0.0001, 'weight_decay': 1e-6, 'early_stopping_patience': 25, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
-
+    return {'epochs': 200, 'batch_size': 64, 'learning_rate': 1e-4, 'weight_decay': 1e-6, 'early_stopping_patience': 25, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
 
 def get_training_config_experimental() -> Dict[str, Any]:
-    return {'epochs': 150, 'batch_size': 32, 'learning_rate': 0.0001, 'weight_decay': 5e-5, 'early_stopping_patience': 20, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
+    return {'epochs': 150, 'batch_size': 32, 'learning_rate': 1e-4, 'weight_decay': 5e-5, 'early_stopping_patience': 20, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
