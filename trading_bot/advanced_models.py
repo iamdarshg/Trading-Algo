@@ -62,6 +62,8 @@ class LiquidTimeConstantLayer(nn.Module):
             sensory_input = self.sensory_w(xt) * torch.sigmoid(self.sensory_mu(xt)) * safe_exp(self.sensory_sigma(xt))
             inter_input = self.inter_w(h) * torch.sigmoid(self.inter_mu(h)) * safe_exp(self.inter_sigma(h))
             dh_dt = (sensory_input + inter_input - h) / torch.clamp(tau, min=EPS)
+            if has_nan_or_inf(dh_dt):
+                raise ValueError(f"NaN/Inf detected in LiquidTimeConstantLayer at t={t}")
             h = h + self.dt * dh_dt
             if has_nan_or_inf(h):
                 raise ValueError(f"NaN/Inf detected in LiquidTimeConstantLayer at t={t}")

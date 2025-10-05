@@ -277,7 +277,6 @@ class TextProcessor:
             tokens = tokens[:max_length]
         return np.array(tokens)
 
-
 def fetch_market_data(symbol: str, 
                      period: str = "2y", 
                      interval: str = "1d") -> pd.DataFrame:
@@ -285,15 +284,67 @@ def fetch_market_data(symbol: str,
     try:
         ticker = yf.Ticker(symbol)
         data = ticker.history(period=period, interval=interval)
+
         if data.empty:
             raise ValueError(f"No data found for symbol {symbol}")
+
         # Reset index to make Date a column
         data.reset_index(inplace=True)
+
         return data
+
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")
         return pd.DataFrame()
 
-
 def get_market_news(symbol: str, days_back: int = 7) -> List[str]:
-    """Fetch recent market news (dummy implementation - replace with real news
+    """Fetch recent market news (dummy implementation - replace with real news API)"""
+    # This is a placeholder - in practice, you would use a news API like Alpha Vantage, NewsAPI, etc.
+    dummy_news = [
+        f"{symbol} shows strong momentum amid market volatility",
+        f"Analysts upgrade {symbol} target price on positive earnings outlook",
+        f"Market sentiment for {symbol} remains bullish despite sector headwinds",
+        f"{symbol} technical indicators suggest potential breakout above resistance",
+        f"Institutional buying pressure observed in {symbol} ahead of earnings"
+    ]
+
+    return dummy_news
+
+# Example usage functions
+def create_sample_dataset(symbol: str = "AAPL", period: str = "2y") -> Dict[str, any]:
+    """Create a sample dataset for testing"""
+
+    # Fetch market data
+    data = fetch_market_data(symbol, period)
+
+    if data.empty:
+        return {}
+
+    # Process data
+    processor = TradingDataProcessor(
+        sequence_length=60,
+        prediction_horizon=1,
+        include_technical_indicators=True,
+        normalize_data=True
+    )
+
+    processed = processor.process_data(data)
+
+    # Get sample news
+    news = get_market_news(symbol)
+
+    # Process text
+    text_processor = TextProcessor()
+    text_processor.build_vocab(news)
+
+    # Encode news
+    encoded_news = [text_processor.encode_text(text) for text in news]
+
+    return {
+        'processed_data': processed,
+        'news': news,
+        'encoded_news': encoded_news,
+        'text_processor': text_processor,
+        'data_processor': processor,
+        'raw_data': data
+    }
