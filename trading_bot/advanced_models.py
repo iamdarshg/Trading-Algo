@@ -5,8 +5,27 @@ import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
 
+EPS = 1e-8
+BIG_CLAMP = 50.0  # to prevent exp overflow
+
+
+def safe_exp(x: torch.Tensor) -> torch.Tensor:
+    # clamp to avoid overflow and NaNs in backward of pow/exp
+    return torch.exp(torch.clamp(x, max=BIG_CLAMP))
+
+
+def safe_softplus(x: torch.Tensor) -> torch.Tensor:
+    # stable softplus
+    return F.softplus(x)
+
+
+def has_nan(x: torch.Tensor) -> bool:
+    return torch.isnan(x).any().item()
+
+
 class TradingModelBase(nn.Module, ABC):
     """Base class for all trading models with standardized interface"""
+
     def __init__(self, input_size: int, hidden_size: int, output_size: int = 1):
         super().__init__()
         self.input_size = input_size
@@ -21,13 +40,15 @@ class TradingModelBase(nn.Module, ABC):
     def get_config(self) -> Dict[str, Any]:
         pass
 
+
 class LiquidTimeConstantLayer(nn.Module):
     """Liquid Time-Constant Network Layer for non-differentiable time series"""
+
     def __init__(self, input_size: int, hidden_size: int, dt: float = 0.1):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.dt = dt
+        self.dt = max(dt, EPS)
         # Sensory weights
         self.sensory_w = nn.Linear(input_size, hidden_size)
         self.sensory_mu = nn.Linear(input_size, hidden_size)
@@ -42,24 +63,30 @@ class LiquidTimeConstantLayer(nn.Module):
     def forward(self, x: torch.Tensor, h: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
         if h is None:
-            h = torch.zeros(batch_size, self.hidden_size).to(x.device)
+            h = torch.zeros(batch_size, self.hidden_size, device=x.device, dtype=x.dtype)
         outputs = []
         for t in range(seq_len):
             xt = x[:, t, :]
-            # Calculate liquid time constants
-            tau = torch.sigmoid(self.time_constant(torch.cat([xt, h], dim=1))) + 0.1
-            # Sensory processing
-            sensory_input = self.sensory_w(xt) * torch.sigmoid(self.sensory_mu(xt)) * torch.exp(self.sensory_sigma(xt))
-            # Inter-neuron processing
-            inter_input = self.inter_w(h) * torch.sigmoid(self.inter_mu(h)) * torch.exp(self.inter_sigma(h))
+            # Calculate liquid time constants with softplus to ensure positivity
+            tau_pre = self.time_constant(torch.cat([xt, h], dim=1))
+            tau = safe_softplus(tau_pre) + 0.1  # >= 0.1
+            # Sensory processing with safe exp
+            sensory_input = self.sensory_w(xt) * torch.sigmoid(self.sensory_mu(xt)) * safe_exp(self.sensory_sigma(xt))
+            # Inter-neuron processing with safe exp
+            inter_input = self.inter_w(h) * torch.sigmoid(self.inter_mu(h)) * safe_exp(self.inter_sigma(h))
             # Differential equation update
-            dh_dt = (sensory_input + inter_input - h) / tau
+            dh_dt = (sensory_input + inter_input - h) / torch.clamp(tau, min=EPS)
             h = h + self.dt * dh_dt
+            if has_nan(h):
+                print("[NaN Alert][LTC] t=", t, " tau nan=", has_nan(tau), flush=True)
+                h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0)
             outputs.append(h.unsqueeze(1))
         return torch.cat(outputs, dim=1)
 
+
 class PiecewiseLinearLayer(nn.Module):
     """Piecewise Linear Layer for handling discontinuities"""
+
     def __init__(self, input_size: int, output_size: int, num_pieces: int = 8):
         super().__init__()
         self.input_size = input_size
@@ -68,8 +95,8 @@ class PiecewiseLinearLayer(nn.Module):
         # Breakpoints for piecewise linear functions
         self.breakpoints = nn.Parameter(torch.linspace(-3, 3, num_pieces))
         # Slopes and intercepts for each piece
-        self.slopes = nn.Parameter(torch.randn(num_pieces, input_size, output_size))
-        self.intercepts = nn.Parameter(torch.randn(num_pieces, output_size))
+        self.slopes = nn.Parameter(torch.randn(num_pieces, input_size, output_size) * 0.1)
+        self.intercepts = nn.Parameter(torch.randn(num_pieces, output_size) * 0.1)
         # Gating network to determine which piece to use
         hidden_size = min(64, input_size * 2)
         self.gate = nn.Sequential(
@@ -92,10 +119,13 @@ class PiecewiseLinearLayer(nn.Module):
         piece_outputs = torch.stack(piece_outputs, dim=1)  # [batch*seq, num_pieces, output_size]
         # Weighted combination of pieces
         output = torch.sum(piece_weights.unsqueeze(-1) * piece_outputs, dim=1)
+        output = torch.nan_to_num(output)
         return output.view(batch_size, seq_len, self.output_size)
+
 
 class SelectiveStateSpaceLayer(nn.Module):
     """Mamba-style Selective State Space Layer"""
+
     def __init__(self, input_size: int, state_size: int, dt_rank: int = 16):
         super().__init__()
         self.input_size = input_size
@@ -103,8 +133,8 @@ class SelectiveStateSpaceLayer(nn.Module):
         self.dt_rank = dt_rank
         # Selective mechanism parameters
         self.dt_proj = nn.Linear(dt_rank, input_size)
-        self.A_log = nn.Parameter(torch.randn(input_size, state_size))
-        self.D = nn.Parameter(torch.randn(input_size))
+        self.A_log = nn.Parameter(torch.randn(input_size, state_size) * 0.02)
+        self.D = nn.Parameter(torch.randn(input_size) * 0.02)
         # Input projections
         self.x_proj = nn.Linear(input_size, dt_rank + state_size * 2)
         self.out_proj = nn.Linear(state_size, input_size)
@@ -114,34 +144,44 @@ class SelectiveStateSpaceLayer(nn.Module):
         # Project input to get dt, B, C
         x_dbl = self.x_proj(x)  # [batch, seq, dt_rank + 2*state_size]
         dt, B, C = torch.split(x_dbl, [self.dt_rank, self.state_size, self.state_size], dim=-1)
-        dt = F.softplus(self.dt_proj(dt))  # [batch, seq, input_size]
-        A = -torch.exp(self.A_log.float())  # [input_size, state_size]
+        # stable positive dt in [eps, ~]
+        dt = safe_softplus(self.dt_proj(dt)) + EPS  # [batch, seq, input_size]
+        # A should be negative for stability
+        A = -safe_exp(self.A_log.float())  # [input_size, state_size]
         # Selective scan
-        h = torch.zeros(batch_size, self.state_size).to(x.device)
+        h = torch.zeros(batch_size, self.state_size, device=x.device, dtype=x.dtype)
         outputs = []
         for t in range(seq_len):
             # Discretize continuous parameters
             dt_t = dt[:, t, :].unsqueeze(-1)  # [batch, input_size, 1]
             # Correct broadcasting: A -> [1, input_size, state_size]
-            A_discrete = torch.exp(A.unsqueeze(0) * dt_t)  # [batch, input_size, state_size]
+            A_discrete = torch.exp(torch.clamp(A.unsqueeze(0) * dt_t, max=BIG_CLAMP))  # [batch, input_size, state_size]
             B_discrete = B[:, t, :].unsqueeze(1) * dt_t  # [batch, input_size, state_size]
             # State update
-            h = A_discrete.sum(dim=1) * h + (B_discrete * x[:, t, :].unsqueeze(-1)).sum(dim=1)
+            h = torch.clamp(A_discrete.sum(dim=1), min=-1e6, max=1e6) * h + (
+                torch.clamp(B_discrete * x[:, t, :].unsqueeze(-1), min=-1e6, max=1e6)
+            ).sum(dim=1)
             # Output
             y = torch.sum(C[:, t, :].unsqueeze(1) * h.unsqueeze(1), dim=-1)
             y = y + self.D * x[:, t, :]
+            if has_nan(h) or has_nan(y):
+                print(f"[NaN Alert][SSM] t={t} dt_nan={has_nan(dt_t)} A_nan={has_nan(A_discrete)}", flush=True)
+                h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0)
+                y = torch.nan_to_num(y)
             outputs.append(y.unsqueeze(1))
         return torch.cat(outputs, dim=1)
 
+
 class MemoryAugmentedLayer(nn.Module):
     """Memory-Augmented Layer for long-term dependencies"""
+
     def __init__(self, input_size: int, memory_size: int, num_heads: int = 8):
         super().__init__()
         self.input_size = input_size
         self.memory_size = memory_size
         self.num_heads = num_heads
         # Memory bank
-        self.memory = nn.Parameter(torch.randn(memory_size, input_size))
+        self.memory = nn.Parameter(torch.randn(memory_size, input_size) * 0.1)
         # Attention mechanisms
         self.query_proj = nn.Linear(input_size, input_size)
         self.key_proj = nn.Linear(input_size, input_size)
@@ -159,7 +199,10 @@ class MemoryAugmentedLayer(nn.Module):
             q = self.query_proj(xt).unsqueeze(1)  # [batch, 1, input_size]
             k = self.key_proj(current_memory)  # [batch, memory_size, input_size]
             v = self.value_proj(current_memory)  # [batch, memory_size, input_size]
-            attention_weights = F.softmax(torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(input_size), dim=-1)
+            scale = float(max(input_size, 1)) ** 0.5
+            logits = torch.matmul(q, k.transpose(-2, -1)) / max(scale, EPS)
+            attention_weights = F.softmax(logits, dim=-1)
+            attention_weights = torch.nan_to_num(attention_weights)
             memory_output = torch.matmul(attention_weights, v).squeeze(1)  # [batch, input_size]
             # Update memory
             update_signal = torch.sigmoid(self.update_gate(torch.cat([xt, memory_output], dim=-1)))
@@ -168,11 +211,16 @@ class MemoryAugmentedLayer(nn.Module):
             for b in range(batch_size):
                 for idx in top_indices[b]:
                     current_memory[b, idx] = (1 - update_signal[b]) * current_memory[b, idx] + update_signal[b] * xt[b]
+            if has_nan(memory_output):
+                print("[NaN Alert][Memory] t=", t, flush=True)
+                memory_output = torch.nan_to_num(memory_output)
             outputs.append(memory_output.unsqueeze(1))
         return torch.cat(outputs, dim=1)
 
+
 class TextEncoder(nn.Module):
     """Simple text encoder for trading prompts"""
+
     def __init__(self, vocab_size: int = 10000, embed_size: int = 128, hidden_size: int = 256):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_size)
@@ -185,9 +233,11 @@ class TextEncoder(nn.Module):
         lstm_out, (hidden, _) = self.lstm(embedded)
         return self.output_proj(hidden[-1])  # Use last hidden state
 
+
 class AdvancedTradingModel(TradingModelBase):
     """Advanced Trading Model combining multiple architectures"""
-    def __init__(self, 
+
+    def __init__(self,
                  price_input_size: int,
                  text_vocab_size: int = 10000,
                  hidden_size: int = 256,
@@ -234,6 +284,7 @@ class AdvancedTradingModel(TradingModelBase):
                 x = layer(x)
             elif isinstance(layer, PiecewiseLinearLayer):
                 x = layer(x)
+            x = torch.nan_to_num(x)
         # Text-price fusion if text is provided
         if text_tokens is not None:
             text_features = self.text_encoder(text_tokens)  # [batch, hidden_size]
@@ -242,7 +293,8 @@ class AdvancedTradingModel(TradingModelBase):
             fused_features, _ = self.fusion_layer(x, text_features, text_features)
             x = x + fused_features
         # Final prediction
-        return self.output_layers(x[:, -1, :])  # Use last timestep
+        out = self.output_layers(x[:, -1, :])  # Use last timestep
+        return torch.nan_to_num(out)
 
     def get_config(self) -> Dict[str, Any]:
         return {
