@@ -89,7 +89,8 @@ class PortfolioManager:
             # Train lightweight or skip if already trained - here we just build model
             model = model_builder.build()
             # Build components
-            broker = LiveDataBroker(symbol=sym, initial_balance=initial_balance)
+            broker = LiveDataBroker(initial_balance=initial_balance)
+
             data_proc: TradingDataProcessor = sample['data_processor']
             strategy = AdvancedMLStrategy(model, data_proc, text_processor=sample.get('text_processor'))
             bot = TradingBot(strategy, broker, symbols=[sym], update_interval=300, max_positions=3, risk_management=True)

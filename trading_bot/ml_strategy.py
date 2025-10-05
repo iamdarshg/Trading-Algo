@@ -203,7 +203,7 @@ class AdvancedMLStrategy(BaseStrategy):
                 confidence=0.0,
                 reasoning=f"Error generating signal: {str(e)}"
             )
-
+import os
 class TradingBot:
     """Main trading bot orchestrator"""
 
@@ -224,7 +224,11 @@ class TradingBot:
 
         self.running = False
         self.last_update = {}
-
+        try:
+            os.makedirs('logs', exist_ok=True)
+            os.makefile('logs/trading_bot.log', exist_ok=True)
+        except Exception as e:
+            print(f"Error creating log directory or file: {e}")
         # Setup logging
         logging.basicConfig(
             level=logging.INFO,

@@ -1,0 +1,8 @@
+2025-10-05 18:18:45,176 - INFO - BUY order placed: 38.76 shares of AAPL | Order ID: ORDER_000001
+2025-10-05 18:18:46,279 - INFO - BUY order placed: 19.33 shares of MSFT | Order ID: ORDER_000001
+2025-10-05 18:18:47,370 - WARNING - No position to sell for GOOGL
+2025-10-05 18:18:48,395 - INFO - BUY order placed: 23.27 shares of TSLA | Order ID: ORDER_000001
+2025-10-05 18:18:49,185 - INFO - BUY order placed: 38.76 shares of AAPL | Order ID: ORDER_000002
+2025-10-05 18:18:50,002 - INFO - BUY order placed: 19.33 shares of MSFT | Order ID: ORDER_000002
+2025-10-05 18:18:50,719 - WARNING - No position to sell for GOOGL
+2025-10-05 18:18:51,462 - INFO - BUY order placed: 23.27 shares of TSLA | Order ID: ORDER_000002
