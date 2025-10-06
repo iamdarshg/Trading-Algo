@@ -263,16 +263,36 @@ def merge_and_live(symbols: List[str], iterations: int = 3, models_dir: str = MO
             builder = create_hybrid_model(input_size, hidden_size=256)
 
         try:
-            # If a saved model exists, load its state_dict
+            # If a saved model exists, load its payload and attempt to reconstruct builder and load weights (non-strict)
+            payload = None
             if os.path.exists(model_path):
-                payload = torch.load(model_path, map_location='cpu')
-                model = builder.build()
-                if 'model_state_dict' in payload:
+                try:
+                    payload = torch.load(model_path, map_location='cpu')
+                except Exception as e:
+                    print(f"Warning: failed to read payload for {sym}: {e}")
+                    payload = None
+
+            # Reconstruct builder from payload if possible
+            if payload and isinstance(payload, dict) and 'model_config' in payload:
+                try:
+                    builder = ModelBuilder.load_config(payload['model_config'])
+                    print(f"Reconstructed builder for {sym} from payload config")
+                except Exception:
+                    pass
+
+            model = builder.build()
+            if payload and isinstance(payload, dict) and 'model_state_dict' in payload:
+                # Try strict load first, then fallback to non-strict partial load
+                try:
                     model.load_state_dict(payload['model_state_dict'])
-            else:
-                model = builder.build()
+                except Exception:
+                    try:
+                        model.load_state_dict(payload['model_state_dict'], strict=False)
+                        print(f"Partial weight load for {sym} (non-strict)")
+                    except Exception as e_load:
+                        print(f"Failed to load weights for {sym}: {e_load}")
         except Exception as e:
-            print(f"Warning: failed to load model for {sym}: {e}")
+            print(f"Warning: failed to build/load model for {sym}: {e}")
             model = builder.build()
 
         # Create broker and strategy
