@@ -28,7 +28,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from trading_bot.data_processor import create_sample_dataset, TradingDataProcessor, TextProcessor
 from trading_bot.model_builder import ModelBuilder, create_hybrid_model
-from trading_bot.trainer import train_model_pipeline, get_training_config_conservative
+from trading_bot.trainer import train_model_pipeline, get_training_config_conservative, get_training_config_aggressive
 from trading_bot.live_broker import LiveDataBroker
 from trading_bot.ml_strategy import AdvancedMLStrategy, create_trading_bot, TradingBot
 from trading_bot.portfolio_manager import PortfolioManager, BotState
@@ -116,10 +116,17 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
     input_size = infer_input_size_from_processed(processed) or 20
 
     # Build a default hybrid model
-    builder = create_hybrid_model(input_size, hidden_size=256)
+    builder = create_hybrid_model(input_size, hidden_size=2048)
 
     # Train
-    training_config = get_training_config_conservative()
+    print("Training configuration:")
+    print("Enter 1 for aggressive training settings")
+    print("Enter 2 for conservative training settings")
+    choice = input("Choose training configuration (1 or 2): ").strip()
+    if choice == '2':
+        training_config = get_training_config_conservative()
+    else:
+        training_config = get_training_config_aggressive()
     training_config['epochs'] = epochs
 
     try:

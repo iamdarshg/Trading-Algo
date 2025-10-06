@@ -238,11 +238,18 @@ class ModelBuilder:
         }
         with open(filepath, 'w') as f:
             json.dump(config, f, indent=2)
+    def get_config(self) -> Dict[str, Any]:
+        """Return a serializable config dict for this builder."""
+        return {
+            'model_name': self.model_name,
+            'input_size': self.input_size,
+            'text_vocab_size': self.text_vocab_size,
+            'layers': [layer.to_dict() for layer in self.layers]
+        }
+
     @classmethod
-    def load_config(cls, filepath: str) -> 'ModelBuilder':
-        """Load model configuration from JSON"""
-        with open(filepath, 'r') as f:
-            config = json.load(f)
+    def from_dict(cls, config: Dict[str, Any]) -> 'ModelBuilder':
+        """Reconstruct a ModelBuilder from an in-memory config dict."""
         builder = cls()
         builder.model_name = config.get('model_name', 'CustomTradingModel')
         builder.input_size = config.get('input_size')
@@ -256,10 +263,27 @@ class ModelBuilder:
             'Linear': LinearConfig
         }
         for layer_dict in config.get('layers', []):
-            layer_class = layer_map[layer_dict['name']]
-            layer_config = layer_class(**layer_dict['params'])
+            name = layer_dict.get('name')
+            params = layer_dict.get('params', {})
+            layer_class = layer_map.get(name)
+            if layer_class is None:
+                # unknown layer; skip
+                continue
+            layer_config = layer_class(**params)
             builder.layers.append(layer_config)
         return builder
+
+    @classmethod
+    def load_config(cls, source) -> 'ModelBuilder':
+        """Load model configuration.
+
+        "source" can be a filepath (str/Path) or a dict-like object.
+        """
+        if isinstance(source, dict):
+            return cls.from_dict(source)
+        with open(source, 'r') as f:
+            config = json.load(f)
+        return cls.from_dict(config)
 # Predefined model configurations
 # Ensure the last builder-added layer is a simple linear projection to 1 output
 # with no activation so the final model output is not expanded (e.g., to 1024)
