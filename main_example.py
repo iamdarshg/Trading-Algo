@@ -91,7 +91,7 @@ def main():
     # Step 1: Create and prepare data
     print("📈 Step 1: Preparing market data...")
     try:
-        sample_data = create_sample_dataset(SYMBOL, period="2y")
+        sample_data = create_sample_dataset(SYMBOL, period="2y", interval="1h")
         if not sample_data:
             print("❌ Failed to fetch market data. Check internet connection.")
             return
@@ -210,7 +210,8 @@ def main():
     print("2. Aggressive (200 epochs, fast learning)")
     print("3. Experimental (150 epochs, balanced)")
 
-    train_choice = input("\nSelect training config (1-3) [1]: ").strip()
+    train_choice = input("\nSelect training config (1-3) [1]: ")
+
     if not train_choice:
         train_choice = "1"
 
@@ -274,7 +275,69 @@ def main():
         print(f"✅ Live data feed established for {SYMBOL}")
         print(latest_data)
 
-        # TODO: Integrate with trading strategy for automated trading
+        # Build or reuse model: if `model` exists (from training) use it; otherwise build an untrained model
+        try:
+            final_model = model
+        except NameError:
+            print("No trained model found in this session, building untrained model for demo...")
+            final_model = model_builder.build()
+
+        # Ensure the model is on CPU for this demo and in eval mode
+        try:
+            final_model.cpu()
+            final_model.eval()
+        except Exception:
+            pass
+
+        # Create the ML strategy
+        try:
+            strategy = AdvancedMLStrategy(
+                model=final_model,
+                data_processor=sample_data['data_processor'],
+                text_processor=sample_data['text_processor'],
+                confidence_threshold=0.6,
+                max_position_size=0.1
+            )
+            print("✅ Strategy created")
+        except Exception as e:
+            print(f"⚠️ Could not create AdvancedMLStrategy: {e}\nFalling back to a trivial strategy that holds.")
+            class HoldStrategy(BaseStrategy):
+                def __init__(self):
+                    super().__init__('HoldStrategy')
+                def generate_signal(self, data):
+                    return TradingSignal(symbol=data.get('symbol',''), signal_type='hold', confidence=0.0)
+            strategy = HoldStrategy()
+
+        # Create or reuse broker
+        bot_broker = live_broker if 'live_broker' in locals() else LiveDataBroker(initial_balance=INITIAL_BALANCE)
+
+        # Create TradingBot via helper
+        try:
+            bot = create_trading_bot(strategy=strategy, broker=bot_broker, symbols=[SYMBOL], update_interval=60, max_positions=3)
+            print("✅ TradingBot instantiated")
+        except Exception as e:
+            print(f"❌ Failed to create TradingBot: {e}")
+            return
+
+        # Run a few simulated iterations
+        print("Running 3 demo trading iterations...")
+        for i in range(3):
+            print(f"-- Iteration {i+1} --")
+            try:
+                bot.run_single_iteration()
+            except Exception as ex:
+                print(f"Iteration {i+1} failed: {ex}")
+
+        # Print portfolio summary
+        try:
+            summary = bot.get_portfolio_summary()
+            print("\nPortfolio Summary:")
+            print(f"  Total Value: ${summary.get('total_value', 0):.2f}")
+            print(f"  Cash Balance: ${summary.get('cash_balance', 0):.2f}")
+            print(f"  P&L: ${summary.get('total_pnl', 0):.2f}")
+            print(f"  Positions: {summary.get('num_positions', 0)}")
+        except Exception as e:
+            print(f"Could not retrieve portfolio summary: {e}")
 
     except Exception as e:
         print(f"❌ Live trading setup failed: {e}")

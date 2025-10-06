@@ -311,11 +311,11 @@ def get_market_news(symbol: str, days_back: int = 7) -> List[str]:
     return dummy_news
 
 # Example usage functions
-def create_sample_dataset(symbol: str = "AAPL", period: str = "2y") -> Dict[str, any]:
+def create_sample_dataset(symbol: str = "AAPL", period: str = "2y", interval: str = "1h") -> Dict[str, any]:
     """Create a sample dataset for testing"""
 
     # Fetch market data
-    data = fetch_market_data(symbol, period)
+    data = fetch_market_data(symbol, period, interval)
 
     if data.empty:
         return {}
