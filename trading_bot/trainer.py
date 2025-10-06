@@ -241,10 +241,38 @@ def create_data_loaders(processed_data: Dict[str, np.ndarray], encoded_news: Opt
     return train_loader, val_loader
 
 
-def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None) -> Tuple[nn.Module, Dict[str, List]]:
+def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None, init_model: Optional[nn.Module] = None, init_state_dict: Optional[Dict[str, Any]] = None) -> Tuple[nn.Module, Dict[str, List]]:
+    """Build (or reuse) a model from model_builder, optionally initialize from an existing model or state_dict,
+    then train it using the provided processed_data and training_config.
+
+    Parameters:
+      - model_builder: ModelBuilder instance
+      - processed_data: dict with X_train, y_train, X_val, y_val
+      - encoded_news: optional list of encoded text features
+      - training_config: training hyperparameters (epochs, batch_size, learning_rate...)
+      - init_model: optional nn.Module to use as starting model (skips model_builder.build())
+      - init_state_dict: optional state_dict to load into the built model (uses strict=False fallback)
+    """
     if training_config is None:
         training_config = {'epochs': 100, 'batch_size': 32, 'learning_rate': 1e-4, 'weight_decay': 1e-5, 'early_stopping_patience': 15, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
-    model = model_builder.build()
+
+    # Use provided model instance if available, otherwise build from builder
+    if init_model is not None:
+        model = init_model
+    else:
+        model = model_builder.build()
+
+    # If a state dict was provided, try to load it (try strict then non-strict)
+    if init_state_dict is not None:
+        try:
+            model.load_state_dict(init_state_dict)
+        except Exception:
+            try:
+                res = model.load_state_dict(init_state_dict, strict=False)
+                # res may contain missing_keys/unexpected_keys; continue anyway
+            except Exception as e:
+                raise RuntimeError(f"Failed to load provided state_dict into model: {e}")
+
     train_loader, val_loader = create_data_loaders(processed_data, encoded_news, batch_size=training_config['batch_size'])
     trainer = TradingTrainer(model=model, learning_rate=training_config['learning_rate'], weight_decay=training_config['weight_decay'], scheduler_type=training_config['scheduler_type'], loss_function=training_config['loss_function'])
     history = trainer.fit(train_dataloader=train_loader, val_dataloader=val_loader, epochs=training_config['epochs'], early_stopping_patience=training_config['early_stopping_patience'], verbose=True)

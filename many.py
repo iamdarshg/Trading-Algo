@@ -100,9 +100,16 @@ def save_model_and_config(symbol: str, model: torch.nn.Module, model_builder: Op
 def load_builder_from_config(config_path: str) -> Optional[ModelBuilder]:
     try:
         if os.path.exists(config_path):
+            # ModelBuilder.load_config now accepts a filepath or dict
             return ModelBuilder.load_config(config_path)
     except Exception:
-        return None
+        try:
+            # try reading raw json and converting
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            return ModelBuilder.load_config(cfg)
+        except Exception:
+            return None
     return None
 
 
@@ -118,6 +125,25 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
     # Build a default hybrid model
     builder = create_hybrid_model(input_size, hidden_size=2048)
 
+    # If a saved model exists, attempt to use its config/weights to initialize
+    init_model = None
+    init_state = None
+    if os.path.exists(model_path):
+        try:
+            payload = torch.load(model_path, map_location='cpu')
+            # try to reconstruct builder from payload model_config first (aggressive)
+            if isinstance(payload, dict) and 'model_config' in payload:
+                try:
+                    builder = ModelBuilder.load_config(payload['model_config'])
+                    print(f"Reconstructed builder from payload model_config for {symbol}")
+                except Exception:
+                    pass
+            # capture state dict for partial load
+            if isinstance(payload, dict) and 'model_state_dict' in payload:
+                init_state = payload['model_state_dict']
+        except Exception as e:
+            print(f"Warning: could not read existing model payload: {e}")
+
     # Train
     print("Training configuration:")
     print("Enter 1 for aggressive training settings")
@@ -130,7 +156,11 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
     training_config['epochs'] = epochs
 
     try:
-        model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config)
+        # pass init_model or init_state to train pipeline if available
+        if init_model is not None:
+            model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config, init_model=init_model)
+        else:
+            model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config, init_state_dict=init_state)
         print(f"Training completed for {symbol}")
     except Exception as e:
         print(f"Training failed for {symbol}: {e}")
@@ -151,13 +181,30 @@ def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR):
     sample = create_sample_dataset(symbol)
     processed = sample['processed_data']
 
+    # Try file-based config first
     builder = None
     if os.path.exists(config_path):
         try:
             builder = ModelBuilder.load_config(config_path)
             print(f"Loaded config from {config_path}")
         except Exception as e:
-            print(f"Failed to load config: {e}")
+            print(f"Failed to load config file: {e}")
+            builder = None
+
+    # If there is a saved model payload, check for embedded model_config and state_dict
+    payload = None
+    if os.path.exists(model_path):
+        try:
+            payload = torch.load(model_path, map_location='cpu')
+        except Exception as e:
+            print(f"Warning: could not read saved model payload: {e}")
+            payload = None
+    # If builder not loaded from file, try to reconstruct from payload
+    if builder is None and isinstance(payload, dict) and 'model_config' in payload:
+        try:
+            builder = ModelBuilder.load_config(payload['model_config'])
+            print("Reconstructed builder from payload model_config")
+        except Exception:
             builder = None
 
     if builder is None:
@@ -171,7 +218,13 @@ def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR):
     training_config['epochs'] = epochs
 
     try:
-        model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config)
+        # Build model and attempt to preload weights (non-strict) if payload contains them
+        init_state = None
+        if isinstance(payload, dict) and 'model_state_dict' in payload:
+            init_state = payload['model_state_dict']
+
+        # If train_model_pipeline supports init_model/init_state_dict, pass them
+        model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config, init_state_dict=init_state)
         print(f"Continued training completed for {symbol}")
     except Exception as e:
         print(f"Continued training failed for {symbol}: {e}")
