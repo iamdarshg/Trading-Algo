@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
-EPS = 1e-8
+EPS = 1e-6
 BIG_CLAMP = 50.0  # to prevent exp overflow
 
 def safe_exp(x: torch.Tensor) -> torch.Tensor:
@@ -60,11 +60,11 @@ class LiquidTimeConstantLayer(nn.Module):
             tau_pre = self.time_constant(torch.cat([xt, h], dim=1))
             tau = safe_softplus(tau_pre) + 0.1
             sensory_input = self.sensory_w(xt) * torch.sigmoid(self.sensory_mu(xt)) * safe_exp(self.sensory_sigma(xt))
-            inter_input = self.inter_w(h) * torch.sigmoid(self.inter_mu(h)) * safe_exp(self.inter_sigma(h))
+            inter_input = torch.clamp(self.inter_w(h) * torch.sigmoid(self.inter_mu(h)) * safe_exp(self.inter_sigma(h)), min=EPS, max=1e6)
             dh_dt = (sensory_input + inter_input - h) / torch.clamp(tau, min=EPS)
             h = h + self.dt * dh_dt
-            if has_nan_or_inf(dh_dt):
-                raise ValueError(f"NaN/Inf detected in dh_dt-LiquidTimeConstantLayer at t={t}")
+            if has_nan_or_inf(h):
+                raise ValueError(f"NaN/Inf detected in h-LiquidTimeConstantLayer at t={t}")
             outputs.append(h.unsqueeze(1))
         out = torch.cat(outputs, dim=1)
         if has_nan_or_inf(out):
@@ -126,6 +126,7 @@ class SelectiveStateSpaceLayer(nn.Module):
                 nn.init.zeros_(lin.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.clamp(min=-1e6, max=1e6)
         batch_size, seq_len, input_size = x.shape
         x_dbl = self.x_proj(x)
         dt, B, C = torch.split(x_dbl, [self.dt_rank, self.state_size, self.state_size], dim=-1)
@@ -137,11 +138,12 @@ class SelectiveStateSpaceLayer(nn.Module):
             dt_t = dt[:, t, :].unsqueeze(-1)
             A_discrete = torch.exp(torch.clamp(A.unsqueeze(0) * dt_t, max=BIG_CLAMP))
             B_discrete = B[:, t, :].unsqueeze(1) * dt_t
-            h = torch.clamp(A_discrete.sum(dim=1), min=-1e6, max=1e6) * h + (torch.clamp(B_discrete * x[:, t, :].unsqueeze(-1), min=-1e6, max=1e6)).sum(dim=1)
-            y = torch.sum(C[:, t, :].unsqueeze(1) * h.unsqueeze(1), dim=-1)
+            h = (torch.clamp(A_discrete.sum(dim=1), min=-1e6, max=1e6) * h + (torch.clamp(B_discrete * x[:, t, :].unsqueeze(-1), min=-1e6, max=1e6)).sum(dim=1)).nan_to_num(1e-8)
+            y = torch.clamp(torch.sum(C[:, t, :].unsqueeze(1) * h.unsqueeze(1), dim=-1), min=-1e6, max=1e6)+1e-6
+            y = y.nan_to_num(1e-12)
             y = y + self.D * x[:, t, :]
             if has_nan_or_inf(h) or has_nan_or_inf(y):
-                raise ValueError(f"NaN/Inf detected in SelectiveStateSpaceLayer at t={t}")
+                raise ValueError(f"NaN/Inf detected in SelectiveStateSpaceLayer at t={t}, and h_nan is {has_nan_or_inf(h)}, y_nan is {has_nan_or_inf(self.D * x[:, t, :])}")
             outputs.append(y.unsqueeze(1))
         out = torch.cat(outputs, dim=1)
         if has_nan_or_inf(out):
@@ -168,24 +170,48 @@ class MemoryAugmentedLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, input_size = x.shape
         outputs = []
-        current_memory = self.memory.unsqueeze(0).repeat(batch_size, 1, 1)
+
+        # Work on a cloned copy of the memory to avoid in-place modification of the Parameter
+        current_memory = self.memory.unsqueeze(0).expand(batch_size, -1, -1).clone()
+
         for t in range(seq_len):
             xt = x[:, t, :]
-            q = self.query_proj(xt).unsqueeze(1)
-            k = self.key_proj(current_memory)
-            v = self.value_proj(current_memory)
+            q = self.query_proj(xt).unsqueeze(1)                       # [B,1,dim]
+            k = self.key_proj(current_memory)                         # [B, M, dim]
+            v = self.value_proj(current_memory)                       # [B, M, dim]
+
             scale = float(max(input_size, 1)) ** 0.5
-            logits = torch.matmul(q, k.transpose(-2, -1)) / max(scale, EPS)
-            attention_weights = F.softmax(logits, dim=-1)
-            memory_output = torch.matmul(attention_weights, v).squeeze(1)
-            update_signal = torch.sigmoid(self.update_gate(torch.cat([xt, memory_output], dim=-1)))
-            _, top_indices = attention_weights.squeeze(1).topk(k=min(8, self.memory_size), dim=-1)
-            for b in range(batch_size):
-                for idx in top_indices[b]:
-                    current_memory[b, idx] = (1 - update_signal[b]) * current_memory[b, idx] + update_signal[b] * xt[b]
+            logits = torch.matmul(q, k.transpose(-2, -1)) / max(scale, EPS)  # [B,1,M]
+            attention_weights = F.softmax(logits, dim=-1)                    # [B,1,M]
+
+            memory_output = torch.matmul(attention_weights, v).squeeze(1)    # [B, dim]
+
+            # Update gating signal (per-feature)
+            update_signal = torch.sigmoid(self.update_gate(torch.cat([xt, memory_output], dim=-1)))  # [B, dim]
+
+            # Choose top-k memory indices to update (vectorized)
+            topk = min(8, self.memory_size)
+            top_values, top_indices = attention_weights.squeeze(1).topk(k=topk, dim=-1)  # [B, topk]
+
+            # Gather selected memory entries: shape [B, topk, dim]
+            idx_exp = top_indices.unsqueeze(-1).expand(-1, -1, input_size)
+            selected_memory = current_memory.gather(1, idx_exp)
+
+            # Compute new values for selected memory slots
+            update_signal_exp = update_signal.unsqueeze(1)   # [B,1,dim]
+            xt_exp = xt.unsqueeze(1)                         # [B,1,dim]
+            new_selected = (1 - update_signal_exp) * selected_memory + update_signal_exp * xt_exp
+
+            # Create a new memory tensor with the selected slots updated (no in-place on Parameter)
+            new_memory = current_memory.clone()
+            new_memory.scatter_(1, idx_exp, new_selected)
+            current_memory = new_memory
+
             if has_nan_or_inf(memory_output):
                 raise ValueError(f"NaN/Inf detected in MemoryAugmentedLayer at t={t}")
+
             outputs.append(memory_output.unsqueeze(1))
+
         out = torch.cat(outputs, dim=1)
         if has_nan_or_inf(out):
             raise ValueError("NaN/Inf detected in MemoryAugmentedLayer output")
