@@ -6,7 +6,6 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 import warnings
-
 warnings.filterwarnings('ignore')
 torch.autograd.set_detect_anomaly(True)
 
@@ -104,7 +103,6 @@ class TradingTrainer:
         else:
             self.scheduler = None
         self.history = {'train_loss': [], 'val_loss': [], 'learning_rates': [], 'epoch_times': []}
-
     @staticmethod
     def _init_weights_kaiming(module: nn.Module):
         for m in module.modules():
@@ -120,14 +118,12 @@ class TradingTrainer:
                         nn.init.zeros_(param)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
-
     def _assert_batch_clean(self, batch: Dict[str, torch.Tensor], stage: str):
         for k in ['price_data', 'target']:
             if k in batch:
                 _assert_no_nan_inf(batch[k], f"in {stage} batch[{k}]")
         if 'text_data' in batch and batch['text_data'] is not None:
             _assert_no_nan_inf(batch['text_data'].float(), f"in {stage} batch[text_data]")
-
     def train_epoch(self, dataloader: DataLoader) -> float:
         self.model.train()
         total_loss = 0.0
@@ -155,7 +151,6 @@ class TradingTrainer:
             total_loss += float(loss.item())
             num_batches += 1
         return total_loss / max(num_batches, 1)
-
     def validate_epoch(self, dataloader: DataLoader) -> Tuple[float, Dict[str, float]]:
         self.model.eval()
         total_loss = 0.0
@@ -191,7 +186,6 @@ class TradingTrainer:
         rmse = float(np.sqrt(np.mean((predictions_np - targets_np) ** 2)))
         metrics = {'directional_accuracy': directional_accuracy, 'mae': mae, 'rmse': rmse}
         return avg_loss, metrics
-
     def fit(self, train_dataloader: DataLoader, val_dataloader: DataLoader, epochs: int = 100, early_stopping_patience: int = 15, save_best: bool = True, model_path: str = 'best_model.pth', verbose: bool = True) -> Dict[str, List]:
         early_stopping = EarlyStopping(patience=early_stopping_patience)
         best_val_loss = float('inf')
@@ -224,7 +218,6 @@ class TradingTrainer:
                 break
         return self.history
 
-
 def create_data_loaders(processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, batch_size: int = 32) -> Tuple[DataLoader, DataLoader]:
     X_train = processed_data['X_train']
     y_train = processed_data['y_train']
@@ -240,90 +233,70 @@ def create_data_loaders(processed_data: Dict[str, np.ndarray], encoded_news: Opt
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
     return train_loader, val_loader
 
-
-def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None, init_model: Optional[nn.Module] = None, init_state_dict: Optional[Dict[str, Any]] = None) -> Tuple[nn.Module, Dict[str, List]]:
+def train_model_pipeline(
+    model_builder,
+    processed_data: Dict[str, np.ndarray],
+    encoded_news: Optional[List[np.ndarray]] = None,
+    training_config: Optional[Dict[str, Any]] = None,
+    init_model: Optional[nn.Module] = None,
+    init_state_dict: Optional[Dict[str, Any]] = None,
+    allow_partial_load: bool = False,
+) -> Tuple[nn.Module, Dict[str, List]]:
     """Build (or reuse) a model from model_builder, optionally initialize from an existing model or state_dict,
     then train it using the provided processed_data and training_config.
-
     Parameters:
       - model_builder: ModelBuilder instance
       - processed_data: dict with X_train, y_train, X_val, y_val
       - encoded_news: optional list of encoded text features
       - training_config: training hyperparameters (epochs, batch_size, learning_rate...)
       - init_model: optional nn.Module to use as starting model (skips model_builder.build())
-      - init_state_dict: optional state_dict to load into the built model (uses strict=False fallback)
+      - init_state_dict: optional state_dict to load into the built model (uses strict=False fallback when allowed)
+      - allow_partial_load: if True, load with strict=False and continue, logging missing/unexpected keys.
     """
     if training_config is None:
-        training_config = {'epochs': 100, 'batch_size': 32, 'learning_rate': 1e-4, 'weight_decay': 1e-5, 'early_stopping_patience': 15, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
-
+        training_config = {
+            'epochs': 100,
+            'batch_size': 32,
+            'learning_rate': 1e-4,
+            'weight_decay': 1e-5,
+            'early_stopping_patience': 15,
+            'scheduler_type': 'cosine',
+            'loss_function': 'trading'
+        }
     # Use provided model instance if available, otherwise build from builder
     if init_model is not None:
         model = init_model
     else:
         model = model_builder.build()
-
-    # If a state dict was provided, try to load it (try strict then non-strict)
+    # If a state dict was provided, try to load it
     if init_state_dict is not None:
-        try:
-            # strict load to ensure exact architectural match
-            model.load_state_dict(init_state_dict)
-        except Exception as e_strict:
-            # try a non-strict load to report missing/unexpected keys for diagnostics, but then fail
+        if allow_partial_load:
+            # Non-strict load and log the diffs, continue training
             try:
                 res = model.load_state_dict(init_state_dict, strict=False)
-                missing = getattr(res, 'missing_keys', None)
-                unexpected = getattr(res, 'unexpected_keys', None)
-            except Exception:
-                missing = None
-                unexpected = None
-            msg_lines = [
-                "Failed to load provided state_dict into model (strict load failed).",
-                f"Original error: {e_strict}",
-            ]
-            if missing is not None or unexpected is not None:
-                msg_lines.append(f"Missing keys: {missing}")
-                msg_lines.append(f"Unexpected keys: {unexpected}")
-            msg_lines.append("Possible fixes:\n - Ensure the saved model's architecture (model_config) matches the current builder.\n - If you intentionally changed the architecture, delete or move the saved model file and re-run training.\n - Re-save the model using the current ModelBuilder.get_config() so reconstruction is possible.")
-            raise RuntimeError("\n".join(msg_lines))
-
-    train_loader, val_loader = create_data_loaders(processed_data, encoded_news, batch_size=training_config['batch_size'])
-    # Quick forward-pass validation to catch shape mismatches early
-    try:
-        model.eval()
-        with torch.no_grad():
-            # get a single batch
-            for b in train_loader:
-                price = b['price_data']
-                text = b.get('text_data', None)
-                # attempt forward
-                _ = model(price.to(next(model.parameters()).device), text.to(next(model.parameters()).device) if text is not None else None)
-                break
-    except Exception as e_forward:
-        # Fail early with an actionable message so the user can fix architecture/weights
-        msg_lines = [
-            "Model forward validation failed during initialization.",
-            f"Error during forward pass: {e_forward}",
-            "Possible causes:",
-            " - The loaded state_dict does not match the model architecture (shapes/parameter names differ).",
-            " - The ModelBuilder used to reconstruct the model is incompatible with the weights in the saved file.",
-            "Actions to fix:",
-            " 1) Ensure the saved model file includes a matching 'model_config' and that ModelBuilder.load_config(payload['model_config']) recreates the exact architecture.",
-            " 2) If you intentionally changed the architecture, delete or move the saved model file so training starts fresh.",
-            " 3) Rebuild/save the model with the current code and call save_model_and_config so future loads will match.",
-            " 4) If you want to force a partial load (not recommended), implement a controlled migration that maps keys and shapes.",
-        ]
-        raise RuntimeError("\n".join(msg_lines))
-
-    trainer = TradingTrainer(model=model, learning_rate=training_config['learning_rate'], weight_decay=training_config['weight_decay'], scheduler_type=training_config['scheduler_type'], loss_function=training_config['loss_function'])
-    history = trainer.fit(train_dataloader=train_loader, val_dataloader=val_loader, epochs=training_config['epochs'], early_stopping_patience=training_config['early_stopping_patience'], verbose=True)
-    return model, history
-
-
-def get_training_config_conservative() -> Dict[str, Any]:
-    return {'epochs': 50, 'batch_size': 16, 'learning_rate': 1e-4, 'weight_decay': 1e-4, 'early_stopping_patience': 10, 'scheduler_type': 'plateau', 'loss_function': 'trading'}
-
-def get_training_config_aggressive() -> Dict[str, Any]:
-    return {'epochs': 200, 'batch_size': 64, 'learning_rate': 1e-4, 'weight_decay': 1e-6, 'early_stopping_patience': 25, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
-
-def get_training_config_experimental() -> Dict[str, Any]:
-    return {'epochs': 150, 'batch_size': 32, 'learning_rate': 1e-4, 'weight_decay': 5e-5, 'early_stopping_patience': 20, 'scheduler_type': 'cosine', 'loss_function': 'trading'}
+                missing = getattr(res, 'missing_keys', []) or []
+                unexpected = getattr(res, 'unexpected_keys', []) or []
+                if missing or unexpected:
+                    print(f"Partial load applied. Missing keys: {missing}; Unexpected keys: {unexpected}")
+            except Exception as e_non_strict:
+                raise RuntimeError(f"Partial (non-strict) load failed: {e_non_strict}")
+        else:
+            # strict load to ensure exact architectural match; if it fails, gather diagnostics and raise
+            try:
+                model.load_state_dict(init_state_dict)
+            except Exception as e_strict:
+                try:
+                    res = model.load_state_dict(init_state_dict, strict=False)
+                    missing = getattr(res, 'missing_keys', None)
+                    unexpected = getattr(res, 'unexpected_keys', None)
+                except Exception:
+                    missing = None
+                    unexpected = None
+                msg_lines = [
+                    "Failed to load provided state_dict into model (strict load failed).",
+                    f"Original error: {e_strict}",
+                ]
+                if missing is not None:
+                    msg_lines.append(f"Missing keys: {missing}")
+                if unexpected is not None:
+                    msg_lines.append(f"Unexpected keys: {unexpected}")
