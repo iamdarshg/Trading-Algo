@@ -288,31 +288,31 @@ def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], e
 
     train_loader, val_loader = create_data_loaders(processed_data, encoded_news, batch_size=training_config['batch_size'])
     # Quick forward-pass validation to catch shape mismatches early
-    # try:
-    model.eval()
-    with torch.no_grad():
-        # get a single batch
-        for b in train_loader:
-            price = b['price_data']
-            text = b.get('text_data', None)
-            # attempt forward
-            _ = model(price.to(next(model.parameters()).device), text.to(next(model.parameters()).device) if text is not None else None)
-            break
-    # except Exception as e_forward:
-    #     # Fail early with an actionable message so the user can fix architecture/weights
-    #     msg_lines = [
-    #         "Model forward validation failed during initialization.",
-    #         f"Error during forward pass: {e_forward}",
-    #         "Possible causes:",
-    #         " - The loaded state_dict does not match the model architecture (shapes/parameter names differ).",
-    #         " - The ModelBuilder used to reconstruct the model is incompatible with the weights in the saved file.",
-    #         "Actions to fix:",
-    #         " 1) Ensure the saved model file includes a matching 'model_config' and that ModelBuilder.load_config(payload['model_config']) recreates the exact architecture.",
-    #         " 2) If you intentionally changed the architecture, delete or move the saved model file so training starts fresh.",
-    #         " 3) Rebuild/save the model with the current code and call save_model_and_config so future loads will match.",
-    #         " 4) If you want to force a partial load (not recommended), implement a controlled migration that maps keys and shapes.",
-    #     ]
-    #     raise RuntimeError("\n".join(msg_lines))
+    try:
+        model.eval()
+        with torch.no_grad():
+            # get a single batch
+            for b in train_loader:
+                price = b['price_data']
+                text = b.get('text_data', None)
+                # attempt forward
+                _ = model(price.to(next(model.parameters()).device), text.to(next(model.parameters()).device) if text is not None else None)
+                break
+    except Exception as e_forward:
+        # Fail early with an actionable message so the user can fix architecture/weights
+        msg_lines = [
+            "Model forward validation failed during initialization.",
+            f"Error during forward pass: {e_forward}",
+            "Possible causes:",
+            " - The loaded state_dict does not match the model architecture (shapes/parameter names differ).",
+            " - The ModelBuilder used to reconstruct the model is incompatible with the weights in the saved file.",
+            "Actions to fix:",
+            " 1) Ensure the saved model file includes a matching 'model_config' and that ModelBuilder.load_config(payload['model_config']) recreates the exact architecture.",
+            " 2) If you intentionally changed the architecture, delete or move the saved model file so training starts fresh.",
+            " 3) Rebuild/save the model with the current code and call save_model_and_config so future loads will match.",
+            " 4) If you want to force a partial load (not recommended), implement a controlled migration that maps keys and shapes.",
+        ]
+        raise RuntimeError("\n".join(msg_lines))
 
     trainer = TradingTrainer(model=model, learning_rate=training_config['learning_rate'], weight_decay=training_config['weight_decay'], scheduler_type=training_config['scheduler_type'], loss_function=training_config['loss_function'])
     history = trainer.fit(train_dataloader=train_loader, val_dataloader=val_loader, epochs=training_config['epochs'], early_stopping_patience=training_config['early_stopping_patience'], verbose=True)

@@ -184,11 +184,19 @@ class ModelBuilder:
                 suggested_heads = max(1, emb_dim // 32)
                 if current_size > 0 and (current_size % suggested_heads == 0):
                     # Use multi-head attention for fusion
+                    # MultiheadAttention expects query/key/value with the same embed_dim as the attention module.
+                    # Our text encoder may produce a different embedding dim (emb_dim). Project text -> current_size.
                     self.fusion_layer = nn.MultiheadAttention(current_size, num_heads=suggested_heads, batch_first=True)
+                    # create optional projection to map text embedding dim -> current_size
+                    if emb_dim != current_size:
+                        self._text_proj = nn.Linear(emb_dim, current_size)
+                    else:
+                        self._text_proj = None
                     self._fusion_type = 'attention'
                 else:
                     # Linear projection fallback (no attention)
                     self.fusion_layer = nn.Linear(emb_dim, current_size)
+                    self._text_proj = None
                     self._fusion_type = 'linear'
                 # Final output layer (separate from user-provided linear layers)
                 self.output_layer = nn.Linear(current_size, 1)
