@@ -113,7 +113,7 @@ def load_builder_from_config(config_path: str) -> Optional[ModelBuilder]:
     return None
 
 
-def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
+def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR, allow_partial_load: bool = False):
     print(f"Training new model for {symbol}...")
     model_path, config_path = _standard_paths(symbol, models_dir)
 
@@ -164,9 +164,8 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
         print(f"Training completed for {symbol}")
     except Exception as e:
         print(f"Training failed for {symbol}: {e}")
-        print("Falling back to untrained model (builder.build())")
-        model = builder.build()
-        history = None
+        # Do not silently fall back; surface the diagnostic to the user so they can fix saved weights/config
+        raise
 
     save_model_and_config(symbol, model, builder, model_path, config_path)
     print(f"Saved model -> {model_path}")
@@ -174,7 +173,7 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR):
     return model_path, config_path
 
 
-def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR):
+def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR, allow_partial_load: bool = False):
     print(f"Loading existing model/config for {symbol} and continuing training...")
     model_path, config_path = _standard_paths(symbol, models_dir)
 
@@ -218,19 +217,18 @@ def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR):
     training_config['epochs'] = epochs
 
     try:
-        # Build model and attempt to preload weights (non-strict) if payload contains them
+        # Build model and attempt to preload weights (non-strict if allowed) if payload contains them
         init_state = None
         if isinstance(payload, dict) and 'model_state_dict' in payload:
             init_state = payload['model_state_dict']
 
         # If train_model_pipeline supports init_model/init_state_dict, pass them
-        model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config, init_state_dict=init_state)
+        model, history = train_model_pipeline(builder, processed, sample.get('encoded_news'), training_config, init_state_dict=init_state, allow_partial_load=allow_partial_load)
         print(f"Continued training completed for {symbol}")
     except Exception as e:
         print(f"Continued training failed for {symbol}: {e}")
-        print("Falling back to builder.build()")
-        model = builder.build()
-        history = None
+        # Surface the error to the caller instead of silently using an untrained model
+        raise
 
     save_model_and_config(symbol, model, builder, model_path, config_path)
     print(f"Saved model -> {model_path}")
@@ -238,7 +236,7 @@ def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR):
     return model_path, config_path
 
 
-def merge_and_live(symbols: List[str], iterations: int = 3, models_dir: str = MODELS_DIR):
+def merge_and_live(symbols: List[str], iterations: int = 3, models_dir: str = MODELS_DIR, allow_partial_load: bool = False):
     print(f"Merging {len(symbols)} symbols into PortfolioManager and running {iterations} live iterations")
 
     pm = PortfolioManager(tickers=symbols)
@@ -282,15 +280,34 @@ def merge_and_live(symbols: List[str], iterations: int = 3, models_dir: str = MO
 
             model = builder.build()
             if payload and isinstance(payload, dict) and 'model_state_dict' in payload:
-                # Try strict load first, then fallback to non-strict partial load
-                try:
-                    model.load_state_dict(payload['model_state_dict'])
-                except Exception:
+                # If partial loads are allowed, try non-strict and log missing/unexpected keys; otherwise require strict match
+                if allow_partial_load:
                     try:
-                        model.load_state_dict(payload['model_state_dict'], strict=False)
-                        print(f"Partial weight load for {sym} (non-strict)")
+                        res = model.load_state_dict(payload['model_state_dict'], strict=False)
+                        missing = getattr(res, 'missing_keys', None)
+                        unexpected = getattr(res, 'unexpected_keys', None)
+                        print(f"Partial load for {sym}: missing={missing}, unexpected={unexpected}")
                     except Exception as e_load:
-                        print(f"Failed to load weights for {sym}: {e_load}")
+                        raise RuntimeError(f"Partial (non-strict) load failed for {sym}: {e_load}")
+                else:
+                    try:
+                        model.load_state_dict(payload['model_state_dict'])
+                    except Exception as e_load:
+                        # attempt to collect missing/unexpected keys via non-strict to include in message
+                        try:
+                            res = model.load_state_dict(payload['model_state_dict'], strict=False)
+                            missing = getattr(res, 'missing_keys', None)
+                            unexpected = getattr(res, 'unexpected_keys', None)
+                        except Exception:
+                            missing = None
+                            unexpected = None
+                        msg = [f"Failed to load saved weights for {sym}: {e_load}"]
+                        if missing is not None:
+                            msg.append(f"Missing keys: {missing}")
+                        if unexpected is not None:
+                            msg.append(f"Unexpected keys: {unexpected}")
+                        msg.append("Please ensure the saved model file matches the intended ModelBuilder architecture or remove the saved file to retrain from scratch.")
+                        raise RuntimeError("\n".join(msg))
         except Exception as e:
             print(f"Warning: failed to build/load model for {sym}: {e}")
             model = builder.build()
@@ -328,6 +345,7 @@ def parse_args():
     p.add_argument('--epochs', type=int, default=50, help='Epochs for training')
     p.add_argument('--models-dir', default=MODELS_DIR, help='Directory to save/load models')
     p.add_argument('--iterations', type=int, default=3, help='Iterations for live merge-and-live')
+    p.add_argument('--allow-partial-load', action='store_true', help='Allow non-strict partial loading of saved state_dicts (logs missing/unexpected keys)')
     return p.parse_args()
 
 
@@ -337,18 +355,18 @@ def main_cli():
         if not args.symbol:
             print('Please specify --symbol for train-new')
             return
-        train_new(args.symbol, epochs=args.epochs, models_dir=args.models_dir)
+        train_new(args.symbol, epochs=args.epochs, models_dir=args.models_dir, allow_partial_load=args.allow_partial_load)
     elif args.mode == 'load-and-train':
         if not args.symbol:
             print('Please specify --symbol for load-and-train')
             return
-        load_and_train(args.symbol, epochs=args.epochs, models_dir=args.models_dir)
+        load_and_train(args.symbol, epochs=args.epochs, models_dir=args.models_dir, allow_partial_load=args.allow_partial_load)
     elif args.mode == 'merge-and-live':
         syms = args.symbols or []
         if not syms:
             print('Please specify --symbols for merge-and-live')
             return
-        merge_and_live(syms, iterations=args.iterations, models_dir=args.models_dir)
+        merge_and_live(syms, iterations=args.iterations, models_dir=args.models_dir, allow_partial_load=args.allow_partial_load)
 
 
 if __name__ == '__main__':
