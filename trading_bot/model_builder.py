@@ -166,6 +166,8 @@ class ModelBuilder:
                 # Build layers
                 self.layers = nn.ModuleList()
                 current_size = int(input_size)
+                # Keep a copy of layer configs for analysis
+                self._layer_configs = list(layers_config)
                 for layer_config in layers_config:
                     layer = layer_config.build(current_size)
                     self.layers.append(layer)
@@ -175,31 +177,60 @@ class ModelBuilder:
                             current_size = int(layer_config.params['output_size'])
                         elif 'hidden_size' in layer_config.params:
                             current_size = int(layer_config.params['hidden_size'])
+
+                # Detect if last configured layer is a final linear to 1. If so, pop it from
+                # self.layers and treat it as the final output projection applied after fusion.
+                self._final_layer = None
+                fusion_input_size = current_size
+                if len(self._layer_configs) > 0:
+                    last_cfg = self._layer_configs[-1]
+                    last_params = getattr(last_cfg, 'params', {})
+                    if isinstance(last_params, dict) and last_params.get('output_size') == 1:
+                        # recompute size prior to final linear
+                        cur = int(input_size)
+                        for cfg in self._layer_configs[:-1]:
+                            p = getattr(cfg, 'params', {})
+                            if 'output_size' in p:
+                                cur = int(p['output_size'])
+                            elif 'hidden_size' in p:
+                                cur = int(p['hidden_size'])
+                        fusion_input_size = cur
+                        # remove final layer from self.layers and save it
+                        if len(self.layers) > 0:
+                            self._final_layer = self.layers.pop(-1)
                 # Fusion layer for text and price data: try attention, otherwise linear projection
                 # Determine embedding dim for text encoder
-                emb_dim = getattr(getattr(self.text_encoder, 'embedding', None), 'embedding_dim', None)
+                # Determine the dimensionality of the text encoder's output features.
+                # Prefer the output projection's out_features (final text feature dim).
+                out_proj = getattr(self.text_encoder, 'output_proj', None)
+                emb_dim = None
+                if out_proj is not None:
+                    emb_dim = getattr(out_proj, 'out_features', None)
                 if emb_dim is None:
-                    # fallback guess
+                    # fallback to embedding dim if output proj not available
+                    emb_dim = getattr(getattr(self.text_encoder, 'embedding', None), 'embedding_dim', None)
+                if emb_dim is None:
                     emb_dim = 128
-                suggested_heads = max(1, emb_dim // 32)
-                if current_size > 0 and (current_size % suggested_heads == 0):
+                suggested_heads = max(1, int(emb_dim) // 32)
+                if fusion_input_size > 0 and (fusion_input_size % suggested_heads == 0):
                     # Use multi-head attention for fusion
-                    # MultiheadAttention expects query/key/value with the same embed_dim as the attention module.
-                    # Our text encoder may produce a different embedding dim (emb_dim). Project text -> current_size.
-                    self.fusion_layer = nn.MultiheadAttention(current_size, num_heads=suggested_heads, batch_first=True)
-                    # create optional projection to map text embedding dim -> current_size
-                    if emb_dim != current_size:
-                        self._text_proj = nn.Linear(emb_dim, current_size)
+                    self.fusion_layer = nn.MultiheadAttention(fusion_input_size, num_heads=suggested_heads, batch_first=True)
+                    # create optional projection to map text feature dim -> fusion_input_size
+                    if int(emb_dim) != fusion_input_size:
+                        self._text_proj = nn.Linear(int(emb_dim), fusion_input_size)
                     else:
                         self._text_proj = None
                     self._fusion_type = 'attention'
                 else:
                     # Linear projection fallback (no attention)
-                    self.fusion_layer = nn.Linear(emb_dim, current_size)
+                    self.fusion_layer = nn.Linear(int(emb_dim), fusion_input_size)
                     self._text_proj = None
                     self._fusion_type = 'linear'
-                # Final output layer (separate from user-provided linear layers)
-                self.output_layer = nn.Linear(current_size, 1)
+                # Final output layer
+                if self._final_layer is not None:
+                    self.output_layer = self._final_layer
+                else:
+                    self.output_layer = nn.Linear(current_size, 1)
             def forward(self, price_data, text_tokens=None):
                 x = price_data
                 # Apply layers sequentially
@@ -222,9 +253,26 @@ class ModelBuilder:
                 if text_tokens is not None:
                     text_features = self.text_encoder(text_tokens)
                     if x.dim() == 3:
+                        # Expand text features across the time dimension
                         text_features = text_features.unsqueeze(1).repeat(1, x.size(1), 1)
+                        # For attention, ensure the price/features fed to attention have the fusion_input_size
                         if self._fusion_type == 'attention':
-                            fused_features, _ = self.fusion_layer(x, text_features, text_features)
+                            if x.size(-1) != self.fusion_layer.embed_dim:
+                                # try to project/trim x to fusion_input_size if possible
+                                if x.size(-1) > self.fusion_layer.embed_dim:
+                                    x_for_fusion = x[..., :self.fusion_layer.embed_dim]
+                                else:
+                                    # pad with zeros if x is smaller (rare)
+                                    pad = torch.zeros(x.size(0), x.size(1), self.fusion_layer.embed_dim - x.size(-1), device=x.device)
+                                    x_for_fusion = torch.cat([x, pad], dim=-1)
+                            else:
+                                x_for_fusion = x
+                            # Project text embeddings to match attention embed dim if needed
+                            if getattr(self, '_text_proj', None) is not None:
+                                tproj = self._text_proj(text_features)
+                            else:
+                                tproj = text_features
+                            fused_features, _ = self.fusion_layer(x_for_fusion, tproj, tproj)
                         else:
                             proj = self.fusion_layer(text_features)
                             fused_features = proj

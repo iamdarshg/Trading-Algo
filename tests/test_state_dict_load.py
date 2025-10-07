@@ -107,5 +107,34 @@ class TestStateDictLoad(unittest.TestCase):
         b = create_memory_focused_model(input_size=10, hidden_size=64)
         self._roundtrip_builder_payload(b, self.model_path)
 
+    # ----- Forward-pass smoke tests -----
+    def _run_forward_pass(self, builder: ModelBuilder, seq_len: int = 8, batch_size: int = 4):
+        if builder.input_size is None:
+            builder.set_input_size(10)
+        model = builder.build()
+        model.eval()
+        # Price data: [batch, seq, features]
+        price = torch.randn(batch_size, seq_len, builder.input_size)
+        # Create dummy text tokens (batch, seq_len_text) integer ids; TextEncoder expects sequence input
+        # use a single-token sequence per batch
+        text_tokens = torch.randint(0, 100, (batch_size, 1), dtype=torch.long)
+        with torch.no_grad():
+            out = model(price, text_tokens)
+        # Output should be [batch, 1]
+        self.assertTrue(isinstance(out, torch.Tensor))
+        self.assertEqual(out.shape, (batch_size, 1))
+
+    def test_hybrid_model_forward_pass(self):
+        b = create_hybrid_model(input_size=10, hidden_size=128)
+        self._run_forward_pass(b)
+
+    def test_ltc_model_forward_pass(self):
+        b = create_ltc_model(input_size=10, hidden_size=64)
+        self._run_forward_pass(b)
+
+    def test_memory_focused_model_forward_pass(self):
+        b = create_memory_focused_model(input_size=10, hidden_size=64)
+        self._run_forward_pass(b)
+
 if __name__ == '__main__':
     unittest.main()
