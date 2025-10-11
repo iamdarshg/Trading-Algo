@@ -348,15 +348,173 @@ def compute_weekly_roi_pct(broker: LiveDataBroker) -> float:
     except Exception:
         pass
     return 0.0
+# ... [existing code above] ...
 
 def pipeline(symbol_file: str, models_dir: str, epochs: int, iterations: int, allow_partial_load: bool,
              roi_week_threshold: float, fee_spec: Optional[str], fee_params: Optional[str]):
+    """Full pipeline: load symbols, train, simulate, promote to live trading"""
     symbols = load_symbols_from_file(symbol_file)
     if not symbols:
         raise ValueError("No symbols loaded from file")
+    
+    print(f"Pipeline processing {len(symbols)} symbols: {symbols}")
+    
     # Train or load+train all bots
     for sym in symbols:
         model_path, _ = _standard_paths(sym, models_dir)
         if os.path.exists(model_path):
             try:
-                load_and_train(sym, epochs=max(1, epochs//2), models_dir=models_dir, allow_partial_load=allow_partial_load
+                load_and_train(sym, epochs=max(1, epochs//2), models_dir=models_dir, allow_partial_load=allow_partial_load)
+                print(f"Continued training for existing {sym}")
+            except Exception as e:
+                print(f"Failed to continue training {sym}: {e}")
+        else:
+            try:
+                train_new(sym, epochs=epochs, models_dir=models_dir, allow_partial_load=allow_partial_load)
+                print(f"Trained new model for {sym}")
+            except Exception as e:
+                print(f"Failed to train new model for {sym}: {e}")
+    
+    # Create portfolio manager and run simulation
+    pm = PortfolioManager(tickers=symbols)
+    fee_fn = parse_fee_function(fee_spec, fee_params)
+    
+    # Add all bots to portfolio
+    for sym in symbols:
+        model_path, config_path = _standard_paths(sym, models_dir)
+        sample = create_sample_dataset(sym)
+        processed = sample['processed_data']
+        
+        builder = _build_or_reconstruct_builder(sym, processed, config_path, model_path, default_hidden=256)
+        model = builder.build()
+        
+        # Load model weights
+        try:
+            if os.path.exists(model_path):
+                payload = torch.load(model_path, map_location='cpu')
+                if isinstance(payload, dict) and 'model_state_dict' in payload:
+                    model.load_state_dict(payload['model_state_dict'], strict=False)
+        except Exception as e:
+            print(f"Warning: failed to load weights for {sym}: {e}")
+        
+        # Create broker with fee function
+        broker = LiveDataBroker(initial_balance=100000.0)
+        if fee_fn is not None:
+            def _apply_fee(amount: float, qty: float, price: float, side: str) -> float:
+                fee = float(fee_fn(amount=amount, qty=qty, price=price, side=side))
+                return max(0.0, amount - fee)
+            setattr(broker, 'apply_fee', _apply_fee)
+        
+        strategy = AdvancedMLStrategy(model=model, data_processor=sample['data_processor'], 
+                                    text_processor=sample.get('text_processor'))
+        bot = create_trading_bot(strategy=strategy, broker=broker, symbols=[sym], 
+                               update_interval=300, max_positions=3)
+        
+        pm.bots[sym] = BotState(bot=bot, broker=broker, strategy=strategy, symbol=sym, state='simulation')
+        print(f"Added {sym} bot to portfolio in simulation mode")
+    
+    # Set ROI promotion threshold
+    if roi_week_threshold is not None:
+        setattr(pm, 'roi_week_threshold', roi_week_threshold)
+        print(f"ROI promotion threshold set to {roi_week_threshold}% per week")
+    
+    # Run simulation iterations
+    for i in range(iterations):
+        print(f"\n--- Pipeline iteration {i+1}/{iterations} ---")
+        try:
+            pm.run_iteration()
+            
+            # Check for ROI-based promotions after each iteration
+            if roi_week_threshold is not None:
+                promote_bots_by_roi(pm, roi_week_threshold)
+                
+        except Exception as e:
+            print(f"Pipeline iteration error: {e}")
+        
+        # Display metrics
+        metrics = pm.compute_portfolio_metrics()
+        print(f"Portfolio metrics after iteration {i+1}:")
+        for key, value in metrics.items():
+            print(f"  {key}: {value}")
+    
+    print("\nPipeline complete!")
+    return pm
+
+def promote_bots_by_roi(pm: PortfolioManager, threshold: float):
+    """Promote simulation bots to live trading if ROI exceeds threshold"""
+    promoted = []
+    
+    for symbol, bot_state in pm.bots.items():
+        if bot_state.state == 'simulation':
+            roi = compute_weekly_roi_pct(bot_state.broker)
+            if roi >= threshold:
+                bot_state.state = 'live'
+                promoted.append(symbol)
+                print(f"🚀 PROMOTED {symbol} to live trading! (ROI: {roi:.2f}%)")
+    
+    if promoted:
+        print(f"Promoted {len(promoted)} bots to live trading: {promoted}")
+    else:
+        print("No bots met ROI threshold for promotion")
+
+def main():
+    parser = argparse.ArgumentParser(description='Training Bot Management CLI')
+    parser.add_argument('mode', choices=['train-new', 'load-and-train', 'merge-and-live', 'pipeline'],
+                       help='Operation mode')
+    
+    # Common arguments
+    parser.add_argument('--symbol', type=str, help='Single symbol to operate on')
+    parser.add_argument('--symbol-file', type=str, help='File containing list of symbols (one per line)')
+    parser.add_argument('--epochs', type=int, default=50, help='Training epochs')
+    parser.add_argument('--iterations', type=int, default=3, help='Live trading iterations')
+    parser.add_argument('--models-dir', type=str, default=MODELS_DIR, help='Directory for model storage')
+    parser.add_argument('--allow-partial-load', action='store_true', 
+                       help='Allow partial loading of model weights')
+    
+    # ROI and fee arguments
+    parser.add_argument('--roi-week-threshold', type=float, 
+                       help='ROI threshold (%) for promoting bots to live trading')
+    parser.add_argument('--fee-spec', type=str, choices=['flat', 'tiered', 'power', 'lambda'],
+                       help='Fee structure type')
+    parser.add_argument('--fee-params', type=str, 
+                       help='Fee parameters as comma-separated key=value pairs')
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.mode == 'train-new':
+            if not args.symbol:
+                raise ValueError("--symbol required for train-new mode")
+            train_new(args.symbol, args.epochs, args.models_dir, args.allow_partial_load)
+            
+        elif args.mode == 'load-and-train':
+            if not args.symbol:
+                raise ValueError("--symbol required for load-and-train mode")
+            load_and_train(args.symbol, args.epochs, args.models_dir, args.allow_partial_load)
+            
+        elif args.mode == 'merge-and-live':
+            if args.symbol_file:
+                symbols = load_symbols_from_file(args.symbol_file)
+            elif args.symbol:
+                symbols = [args.symbol]
+            else:
+                raise ValueError("Either --symbol or --symbol-file required for merge-and-live mode")
+            
+            merge_and_live(symbols, args.iterations, args.models_dir, args.allow_partial_load,
+                          args.roi_week_threshold, args.fee_spec, args.fee_params)
+            
+        elif args.mode == 'pipeline':
+            if not args.symbol_file:
+                raise ValueError("--symbol-file required for pipeline mode")
+            if args.roi_week_threshold is None:
+                raise ValueError("--roi-week-threshold required for pipeline mode")
+            
+            pipeline(args.symbol_file, args.models_dir, args.epochs, args.iterations,
+                    args.allow_partial_load, args.roi_week_threshold, args.fee_spec, args.fee_params)
+                    
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
