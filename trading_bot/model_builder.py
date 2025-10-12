@@ -352,7 +352,7 @@ def create_ltc_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
             # Last builder layer must be simple linear to 1 with no activation
             .add_linear(output_size=1, activation='relu', dropout=0.0))
 
-def create_hybrid_model(input_size: int, hidden_size: int = 2048) -> ModelBuilder:
+def create_hybrid_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
     """Create a hybrid model with multiple advanced architectures"""
     return (ModelBuilder()
             .set_input_size(input_size)

@@ -234,7 +234,7 @@ def create_data_loaders(processed_data: Dict[str, np.ndarray], encoded_news: Opt
     return train_loader, val_loader
 
 
-def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None, init_model: Optional[nn.Module] = None, init_state_dict: Optional[Dict[str, Any]] = None) -> Tuple[nn.Module, Dict[str, List]]:
+def train_model_pipeline(model_builder, processed_data: Dict[str, np.ndarray], encoded_news: Optional[List[np.ndarray]] = None, training_config: Optional[Dict[str, Any]] = None, init_model: Optional[nn.Module] = None, init_state_dict: Optional[Dict[str, Any]] = None, allow_partial_load: bool = False) -> Tuple[nn.Module, Dict[str, List]]:
     """Build (or reuse) a model from model_builder, optionally initialize from an existing model or state_dict,
     then train it using the provided processed_data and training_config.
 
