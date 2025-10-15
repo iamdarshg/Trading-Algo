@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import yfinance as yf
 
 class TradingDataProcessor:
@@ -298,17 +298,103 @@ def fetch_market_data(symbol: str,
         return pd.DataFrame()
 
 def get_market_news(symbol: str, days_back: int = 7) -> List[str]:
-    """Fetch recent market news (dummy implementation - replace with real news API)"""
-    # This is a placeholder - in practice, you would use a news API like Alpha Vantage, NewsAPI, etc.
-    dummy_news = [
-        f"{symbol} shows strong momentum amid market volatility",
-        f"Analysts upgrade {symbol} target price on positive earnings outlook",
-        f"Market sentiment for {symbol} remains bullish despite sector headwinds",
-        f"{symbol} technical indicators suggest potential breakout above resistance",
-        f"Institutional buying pressure observed in {symbol} ahead of earnings"
-    ]
+    """Fetch recent market news for the company tied to `symbol`.
 
-    return dummy_news
+    Attempts to use the NewsAPI (https://newsapi.org/) with the API key provided
+    in the `NEWSAPI_KEY` environment variable. If the key is missing or any error
+    occurs, falls back to a small set of dummy headlines.
+
+    Parameters
+    - symbol: ticker symbol (e.g. 'AAPL')
+    - days_back: number of days in the past to include articles from
+
+    Returns a list of headline strings (may be empty).
+    """
+    import os
+
+    # Helper: fallback dummy headlines
+    def _dummy():
+        return [
+            f"{symbol} shows strong momentum amid market volatility",
+            f"Analysts upgrade {symbol} target price on positive earnings outlook",
+            f"Market sentiment for {symbol} remains bullish despite sector headwinds",
+            f"{symbol} technical indicators suggest potential breakout above resistance",
+            f"Institutional buying pressure observed in {symbol} ahead of earnings",
+        ]
+
+    # Try to get a nicer company name via yfinance; if not available we use the symbol
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info if hasattr(ticker, 'info') else {}
+        company = info.get('longName') or info.get('shortName') or symbol
+    except Exception:
+        company = symbol
+
+    api_key = os.getenv('NEWSAPI_KEY')
+
+    # If there's no API key configured, fall back to dummy headlines
+    if not api_key:
+        print('NEWSAPI_KEY not set in environment; returning fallback dummy headlines')
+        return _dummy()
+
+    # Build query: search for company name or ticker
+    query = f'"{company}" OR {symbol}'
+
+    # NewsAPI expects ISO8601 datetimes; compute from/to
+    # Use timezone-aware UTC datetimes to match article timestamps which are RFC3339/Z
+    to_dt = datetime.now(timezone.utc)
+    from_dt = to_dt - timedelta(days=days_back)
+    url = 'https://newsapi.org/v2/everything'
+    params = {
+        'q': query,
+        'from': from_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'to': to_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'language': 'en',
+        'sortBy': 'relevancy',
+        'pageSize': 30,
+    }
+
+    # Send the API key in the X-Api-Key header (preferred by NewsAPI)
+    headers = {'X-Api-Key': api_key}
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        # If non-200, log status and body (don't print the API key)
+        if resp.status_code != 200:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            print(f'NewsAPI request failed: status={resp.status_code}, body={body}')
+            return _dummy()
+        data = resp.json()
+        if data.get('status') != 'ok':
+            print(f"NewsAPI returned non-ok status: {data.get('status')} - {data.get('message')}")
+            return _dummy()
+        articles = data.get('articles', [])
+        headlines = []
+        for art in articles:
+            # Filter by publishedAt safety (some articles may not have it)
+            pub = art.get('publishedAt')
+            if pub:
+                try:
+                    pub_dt = datetime.fromisoformat(pub.replace('Z', '+00:00'))
+                except Exception:
+                    pub_dt = None
+                if pub_dt is not None and pub_dt < from_dt:
+                    continue
+            title = art.get('title') or art.get('description')
+            if title:
+                headlines.append(title)
+
+        if not headlines:
+            return _dummy()
+        return headlines
+
+    except Exception as e:
+        # Any error -> return fallback
+        print(f"Error fetching news for {symbol}: {e}")
+        return _dummy()
 
 # Example usage functions
 def create_sample_dataset(symbol: str = "AAPL", period: str = "2y", interval: str = "1h") -> Dict[str, any]:

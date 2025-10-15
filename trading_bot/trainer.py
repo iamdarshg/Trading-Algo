@@ -192,9 +192,9 @@ class TradingTrainer:
         if verbose:
             print(f"Training on device: {self.device}")
             print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-            print("="*60)
+            print("="*120)
         for epoch in range(epochs):
-            start_time = datetime.now()
+            start_time = datetime.utcnow()
             train_loss = self.train_epoch(train_dataloader)
             val_loss, val_metrics = self.validate_epoch(val_dataloader)
             if self.scheduler is not None:
@@ -205,12 +205,12 @@ class TradingTrainer:
             self.history['train_loss'].append(train_loss)
             self.history['val_loss'].append(val_loss)
             self.history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
-            epoch_time = (datetime.now() - start_time).total_seconds()
+            epoch_time = (datetime.utcnow() - start_time).total_seconds()
             self.history['epoch_times'].append(epoch_time)
             if save_best and val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(), 'optimizer_state_dict': self.optimizer.state_dict(), 'val_loss': val_loss, 'val_metrics': val_metrics}, model_path)
-            if verbose and ((epoch + 1) % 10 == 0 or not np.isfinite(train_loss) or not np.isfinite(val_loss)):
+            if verbose and ((epoch + 1) % 5 == 0 or not np.isfinite(train_loss) or not np.isfinite(val_loss)):
                 print(f"Epoch {epoch+1:3d}/{epochs} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | Dir Acc: {val_metrics['directional_accuracy']:.3f} | Time: {epoch_time:.2f}s")
             if early_stopping(val_loss, self.model):
                 if verbose:

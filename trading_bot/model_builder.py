@@ -343,7 +343,7 @@ class ModelBuilder:
 # Predefined model configurations
 # Ensure the last builder-added layer is a simple linear projection to 1 output
 # with no activation so the final model output is not expanded (e.g., to 1024)
-def create_ltc_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
+def create_ltc_model(input_size: int, hidden_size: int = 16) -> ModelBuilder:
     """Create a model focused on Liquid Time-Constants for non-differentiable signals"""
     return (ModelBuilder()
             .set_input_size(input_size)
@@ -352,18 +352,18 @@ def create_ltc_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
             # Last builder layer must be simple linear to 1 with no activation
             .add_linear(output_size=1, activation='relu', dropout=0.0))
 
-def create_hybrid_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
+def create_hybrid_model(input_size: int, hidden_size: int = 16) -> ModelBuilder:
     """Create a hybrid model with multiple advanced architectures"""
     return (ModelBuilder()
             .set_input_size(input_size)
             .add_ltc(hidden_size=hidden_size)
-            .add_selective_ssm(state_size=hidden_size//2)
-            .add_memory_augmented(memory_size=512)
-            .add_piecewise_linear(output_size=hidden_size//2, num_pieces=16)
+            .add_selective_ssm(state_size=hidden_size//3)
+            .add_memory_augmented(memory_size=hidden_size//2, num_heads=4)
+            .add_piecewise_linear(output_size=hidden_size//2, num_pieces=8)
             # Fix the bug: do NOT output 1024; use 1 with no activation
             .add_linear(output_size=1, activation='relu', dropout=0.0))
 
-def create_memory_focused_model(input_size: int, hidden_size: int = 256) -> ModelBuilder:
+def create_memory_focused_model(input_size: int, hidden_size: int = 16) -> ModelBuilder:
     """Create a model focused on long-term memory for trend analysis"""
     return (ModelBuilder()
             .set_input_size(input_size)

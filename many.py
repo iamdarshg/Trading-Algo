@@ -94,7 +94,7 @@ def load_builder_from_config(config_path: str) -> Optional[ModelBuilder]:
             return None
     return None
 
-def _build_or_reconstruct_builder(symbol: str, processed: dict, config_path: str, model_path: str, default_hidden: int = 256) -> ModelBuilder:
+def _build_or_reconstruct_builder(symbol: str, processed: dict, config_path: str, model_path: str, default_hidden: int = 32) -> ModelBuilder:
     builder = None
     if os.path.exists(config_path):
         try:
@@ -113,7 +113,7 @@ def _build_or_reconstruct_builder(symbol: str, processed: dict, config_path: str
         except Exception:
             builder = None
     if builder is None:
-        input_size = infer_input_size_from_processed(processed) or 20
+        input_size = infer_input_size_from_processed(processed) or 10
         builder = create_hybrid_model(input_size, hidden_size=default_hidden)
     return builder
 
@@ -123,7 +123,7 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR, allow
     sample = create_sample_dataset(symbol)
     processed = sample['processed_data']
     input_size = infer_input_size_from_processed(processed) or 20
-    builder = create_hybrid_model(input_size, hidden_size=2048)
+    builder = create_hybrid_model(input_size, hidden_size=32)
     init_model = None
     init_state = None
     if os.path.exists(model_path):
@@ -162,7 +162,7 @@ def train_new(symbol: str, epochs: int = 50, models_dir: str = MODELS_DIR, allow
     print(f"Saved config -> {config_path}")
     return model_path, config_path
 
-def load_and_train(symbol: str, epochs: int = 20, models_dir: str = MODELS_DIR, allow_partial_load: bool = False):
+def load_and_train(symbol: str, epochs: int = 2, models_dir: str = MODELS_DIR, allow_partial_load: bool = False):
     print(f"Loading existing model/config for {symbol} and continuing training...")
     model_path, config_path = _standard_paths(symbol, models_dir)
     sample = create_sample_dataset(symbol)
@@ -385,7 +385,7 @@ def pipeline(symbol_file: str, models_dir: str, epochs: int, iterations: int, al
         sample = create_sample_dataset(sym)
         processed = sample['processed_data']
         
-        builder = _build_or_reconstruct_builder(sym, processed, config_path, model_path, default_hidden=256)
+        builder = _build_or_reconstruct_builder(sym, processed, config_path, model_path, default_hidden=0)
         model = builder.build()
         
         # Load model weights
@@ -410,7 +410,7 @@ def pipeline(symbol_file: str, models_dir: str, epochs: int, iterations: int, al
         bot = create_trading_bot(strategy=strategy, broker=broker, symbols=[sym], 
                                update_interval=300, max_positions=3)
         
-        pm.bots[sym] = BotState(bot=bot, broker=broker, strategy=strategy, symbol=sym, state='simulation')
+        pm.bots[sym] = BotState(bot=bot, broker=broker, strategy=strategy, symbol=sym)
         print(f"Added {sym} bot to portfolio in simulation mode")
     
     # Set ROI promotion threshold
